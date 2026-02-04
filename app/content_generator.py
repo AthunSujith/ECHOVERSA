@@ -341,6 +341,139 @@ Provide only the poem, no title or additional text."""
         return self.name
 
 
+class OpenAIGenerator(ContentGeneratorInterface):
+    """OpenAI GPT content generator."""
+    
+    def __init__(self, api_key: Optional[str] = None):
+        """
+        Initialize OpenAI generator.
+        
+        Args:
+            api_key: OpenAI API key (optional, can be set via environment)
+        """
+        self.name = "openai-gpt4"
+        self.api_key = api_key or os.getenv("OPENAI_API_KEY")
+        self._client = None
+        self._available = False
+        
+        # Try to initialize OpenAI client
+        self._initialize_client()
+    
+    def _initialize_client(self):
+        """Initialize the OpenAI client if possible."""
+        try:
+            from openai import OpenAI
+            
+            if not self.api_key:
+                logger.logger.warning("OpenAI API key not found. Generator will be unavailable.")
+                return
+            
+            self._client = OpenAI(api_key=self.api_key)
+            self._available = True
+            logger.logger.info("OpenAI generator initialized successfully")
+            
+        except ImportError:
+            logger.logger.warning("OpenAI library not installed. Generator unavailable.")
+        except Exception as e:
+            logger.logger.error(f"Failed to initialize OpenAI client: {e}")
+    
+    @monitor_performance("openai_content_generation")
+    def generate_support_and_poem(self, input_data: ProcessedInput) -> GeneratedContent:
+        """
+        Generate supportive content using OpenAI API.
+        """
+        if not self.is_available():
+            degradation_manager.register_component_failure(
+                component="openai_api",
+                error=Exception("OpenAI API not available"),
+                fallback_description="Mock generator"
+            )
+            raise RuntimeError("OpenAI generator is not available")
+        
+        def openai_api_call():
+            # Create prompts
+            support_system = "You are a compassionate AI companion. Provide a warm, supportive, and empathetic response (2-3 sentences) acknowledging the user's feelings."
+            poem_system = "You are an uplifting poet. Write a short, hopeful poem (4-8 lines) based on the user's input. Provide ONLY request in output."
+            
+            # Generate supportive statement
+            support_response = self._client.chat.completions.create(
+                model="gpt-4o",
+                messages=[
+                    {"role": "system", "content": support_system},
+                    {"role": "user", "content": input_data.content}
+                ],
+                temperature=0.7
+            )
+            supportive_statement = support_response.choices[0].message.content.strip()
+            
+            # Generate poem
+            poem_response = self._client.chat.completions.create(
+                model="gpt-4o",
+                messages=[
+                    {"role": "system", "content": poem_system},
+                    {"role": "user", "content": input_data.content}
+                ],
+                temperature=0.7
+            )
+            poem = poem_response.choices[0].message.content.strip()
+            
+            return supportive_statement, poem
+        
+        def fallback_generation():
+            logger.logger.warning("Using fallback generation for OpenAI API failure")
+            return (
+                "I hear you and I'm here for you. Your feelings are valid.",
+                "In shadows deep or light of day,\nHope will always find a way."
+            )
+        
+        start_time = time.time()
+        
+        try:
+            result, success = safe_api_call(
+                api_name="openai_api",
+                api_function=openai_api_call,
+                fallback_function=fallback_generation,
+                max_retries=2,
+                timeout=30.0
+            )
+            
+            if result:
+                supportive_statement, poem = result
+                processing_time = time.time() - start_time
+                
+                metadata = {
+                    "generator": self.name,
+                    "processing_time": processing_time,
+                    "input_type": input_data.input_type.value if hasattr(input_data, 'input_type') else 'unknown',
+                    "content_length": len(input_data.content) if hasattr(input_data, 'content') else 0,
+                    "api_success": success,
+                    "fallback_used": not success
+                }
+                
+                if success:
+                    logger.logger.info(f"OpenAI generator created content in {processing_time:.2f}s")
+                else:
+                    logger.logger.warning("OpenAI fallback used")
+                    
+                return GeneratedContent(
+                    supportive_statement=supportive_statement,
+                    poem=poem,
+                    generation_metadata=metadata
+                )
+            else:
+                raise RuntimeError("OpenAI generation failed")
+                
+        except Exception as e:
+            logger.logger.error(f"OpenAI generation failed: {e}")
+            raise RuntimeError(f"Content generation failed: {e}")
+
+    def is_available(self) -> bool:
+        return self._available and self._client is not None
+    
+    def get_generator_name(self) -> str:
+        return self.name
+
+
 class LocalModelGenerator(ContentGeneratorInterface):
     """Local model generator using GGUF models with llama.cpp."""
     
@@ -547,6 +680,18 @@ class ContentGenerator:
     def _initialize_generators(self, gemini_api_key: Optional[str]):
         """Initialize generators."""
         
+        # 1. Try OpenAI (Top Priority if available)
+        openai_key = os.getenv("OPENAI_API_KEY")
+        if openai_key:
+            try:
+                openai_gen = OpenAIGenerator(openai_key)
+                if openai_gen.is_available():
+                    self.generators.append(openai_gen)
+                    logger.logger.info("OpenAI generator added to chain")
+            except Exception as e:
+                logger.logger.warning(f"Failed to initialize OpenAI: {e}")
+
+        # 2. Try Gemini (Second Priority)
         # Try Gemini first if key available (Preferred for Cloud/Vercel)
         if gemini_api_key or os.getenv("GEMINI_API_KEY"):
             try:

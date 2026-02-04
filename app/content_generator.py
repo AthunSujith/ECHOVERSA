@@ -545,8 +545,19 @@ class ContentGenerator:
         self._initialize_generators(gemini_api_key)
     
     def _initialize_generators(self, gemini_api_key: Optional[str]):
-        """Initialize only local model generators."""
-        logger.logger.info("Initializing LOCAL MODELS ONLY - Gemini API disabled")
+        """Initialize generators."""
+        
+        # Try Gemini first if key available (Preferred for Cloud/Vercel)
+        if gemini_api_key or os.getenv("GEMINI_API_KEY"):
+            try:
+                gemini_gen = GeminiGenerator(gemini_api_key)
+                if gemini_gen.is_available():
+                    self.generators.append(gemini_gen)
+                    logger.logger.info("Gemini generator added to chain")
+            except Exception as e:
+                logger.logger.warning(f"Failed to initialize Gemini: {e}")
+                
+        logger.logger.info("Initializing Local Models as backup")
         
         # Try to initialize local model generator
         try:

@@ -9,7 +9,7 @@ function App() {
 
   useEffect(() => {
     // Fetch config on load to know about AI models
-    fetch('http://localhost:8000/api/config')
+    fetch('/api/config')
       .then(res => res.json())
       .then(data => setConfig(data))
       .catch(err => console.error("Backend offline?", err));
